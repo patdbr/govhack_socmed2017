@@ -1,0 +1,194 @@
+setwd("~/Documents/GovHack")
+library(httr)
+library(twitteR)
+library(base64enc)
+library(RCurl)
+library(stringr)
+library(wordcloud)
+library(tm)
+library(igraph)
+library(tidyverse)
+library(GGally)
+#library(RWeka) - for two and three word groupings but has java bugs in macos x
+
+#twitter authorisations
+setup_twitter_oauth(“<twitter comsumerkey>”,”<twitter consumerSecret>”)
+
+#functions
+tweet_data <- function(x){
+  social_tweets<-unlist(sapply(x,function(t) t$getText()))
+  social_isretweet<-unlist(sapply(x,function(t) t$getIsRetweet()))
+  social_getretweet<-unlist(sapply(x,function(t) t$getRetweeted()))
+  social_retweetcount<-unlist(sapply(x,function(t) t$getRetweetCount()))
+  social_screenname<-unlist(sapply(x,function(t) t$getScreenName()))
+  social_fav<-unlist(sapply(x,function(t) t$getFavoriteCount()))
+  social_retweeters<-unlist(sapply(x,function(t) t$getRetweeters))
+  
+  data<-cbind.data.frame(tweet=social_tweets,
+                         screenname=social_screenname,
+                         retweetcount=social_retweetcount,
+                         retweeted=social_isretweet,
+                         FavCount=social_fav,
+                         stringsAsFactors=FALSE
+  )
+return(data)
+  }
+
+score.sentiment <- function(sentences, pos.words, neg.words, .progress='none')
+{
+  require(plyr)
+  require(stringr)
+  scores = laply(sentences, function(sentence, pos.words, neg.words) {
+    sentence = gsub('[[:punct:]]', '', sentence)
+    sentence = gsub('[[:cntrl:]]', '', sentence)
+    sentence = gsub('\\d+', '', sentence)
+    sentence = iconv(sentence, "UTF-8", "ASCII")
+    tryTolower = function(x){
+      y = NA
+      try_error = tryCatch(tolower(x), error=function(e) e)
+      if (!inherits(try_error, "error"))
+        y = tolower(x)
+      return(y)
+    }
+    tweet = sapply(tweet, tryTolower)
+    word.list = str_split(sentence, '\\s+')
+    words = unlist(word.list)
+    pos.matches = match(words, pos.words)
+    neg.matches = match(words, neg.words)
+    pos.matches = !is.na(pos.matches)
+    neg.matches = !is.na(neg.matches)
+    score = sum(pos.matches) - sum(neg.matches)
+    return(score)
+  }, pos.words, neg.words, .progress=.progress )
+  scores.df = data.frame(score=scores, text=sentences)
+  return(scores.df)
+}
+
+
+#Data import
+
+tweetsearch <- readline("What do you want to search for?")
+social<- searchTwitter(tweetsearch, n=30000) 
+
+hu.liu.pos <- scan('positive-words.txt',what='character',comment.char = ';')
+hu.liu.neg <- scan('negative-words.txt',what='character',comment.char = ';')
+pos.words <- c(hu.liu.pos,'sweet')
+neg.words <- c(hu.liu.neg,'wtf','epicfail')
+
+
+#Data manipulation
+
+social_tweets <- tweet_data(social)
+stats<-social_tweets %>% filter(retweeted == TRUE) %>%
+        summarise(tweets=n(),
+          n_dist_tweeters=n_distinct(screenname),
+          max_retweeet=max(retweetcount),
+          mean_retweet=mean(retweetcount),
+          sum_retweets=sum(retweetcount),
+          median_retweet=median(retweetcount)
+          )
+
+social_rt_patterns<-grep("(RT|via)((?:\\b\\W*@\\w+)+)", social_tweets$tweet, ignore.case=TRUE)
+social_rt <- social_tweets[social_rt_patterns,]
+who_retweet<-as.list(1:length(social_rt_patterns))
+who_post<-as.list(1:length(social_rt_patterns))
+
+for (i in 1:length(social_rt_patterns))
+{
+  twit<-social[[social_rt_patterns[i]]]
+  poster=str_extract_all(twit$getText(),
+                         "(RT|via)((?:\\b\\W*@\\w+)+)")
+  
+  poster=gsub(":","", unlist (poster))
+  who_post[[i]] = gsub("(RT @|via @)", "",poster, ignore.case=TRUE)
+  who_retweet[[i]] = rep(twit$getScreenName(), length(poster))
+}
+
+who_post= unlist(who_post)
+who_retweet = unlist(who_retweet)
+
+retweeter_poster = cbind(who_retweet, who_post)
+rt_graph = graph.edgelist(retweeter_poster)
+ver_lab = get.vertex.attribute(rt_graph, "name", index=V(rt_graph))
+
+#Network mapping
+glay <- layout.fruchterman.reingold(rt_graph)
+clay <- layout_in_circle(rt_graph)
+net_file <- paste(format(Sys.time(),"%Y-%m-%d %H-%M"),tweetsearch,"network_map.pdf")
+pdf(file=net_file, height=11.69, width = 16.53)
+par(bg="gray10", mar=c(1,1,1,1))
+plot(rt_graph, layout=glay,
+     vertex.color=hsv(h=.35,s=1,v=.7,alpha=0.1),
+     vertex.frame.color=hsv(h=.35,s=1,v=.7, alpha=0.1),
+     vertex.shape="none",
+     vertex.size=4,
+     vertex.label=ver_lab,
+     vertex.label.family="mono",
+     vertex.label.color=hsv(h=0, s=0, v=.95, alpha = 0.5),
+     vertex.label.cex=.85,
+     edge.arrow.size=.4,
+     edge.arrow.width=.5,
+     edge.width=3,
+     edge.color=hsv(h=.35, s=1, v=.7, alpha=0.4))
+title(main = "Tweeter Network Map - Fruchterman Reingold", col.main="white")
+plot(rt_graph, layout = clay,
+     vertex.color=hsv(h=.35,s=1,v=.7,alpha=0.1),
+     vertex.frame.color=hsv(h=.35,s=1,v=.7, alpha=0.1),
+     vertex.size = .5,
+     vertex.label.color="white",
+     vertex.label.distance = 1,
+     vertex.label.cex = .75,
+     vertex.label = ifelse(igraph::degree(rt_graph) > 25, V(rt_graph)$name, NA),
+     edge.color=hsv(h=.35, s=1, v=.7, alpha=0.4),
+     edge.width = .5,
+     edge.arrow.size=0)
+title(main = "Tweeter Network Map - Circle \n degree centrality > 25", 
+      col.main="white",
+      line = -1.5,
+      cex.main = 1.1)
+dev.off()
+
+#Network metrics
+rt_degree<-degree(rt_graph,mode="total")
+rt_between<- betweenness(rt_graph)
+edge_density(rt_graph, loops = TRUE)
+rt_g_df<-as.data.frame(rt_between)
+rt_g_df$degree <- rt_degree
+write(rt_g_df, "eigen.txt")
+
+netmet_name <- paste(format(Sys.time(),"%Y-%m-%d %H-%M"),tweetsearch,"network_metrics.csv")
+write.csv(rt_g_df, netmet_name)
+
+#Sentiment analysis
+score<-score.sentiment(social_tweets$tweet,pos.words,neg.words,.progress='text')
+histname<- paste(format(Sys.time(),"%Y-%m-%d %H-%M histogram"),"pdf",sep=".")
+pdf(file=histname,width = 8.4,height = 11.4)
+hist(score$score,breaks=-4.5:4.5,right = F,main="Tweet Sentiment",xlab = "Negative - Positive",labels = TRUE, color = "white")
+hist(social_tweets$retweetcount,right = F,main="retweets per tweet",labels=TRUE)
+dev.off()
+
+#Wordcloud
+social_tweets$tweet <- sapply(social_tweets$tweet,function(row) iconv(row, "latin1", "ASCII", sub=""))
+social_corpus <- str_replace_all(social_tweets$tweet,"[^[:graph:]]", " ") 
+corpus <- Corpus(VectorSource(social_tweets$tweet))
+corpus <- corpus %>%
+  tm_map(function(x) removeWords(x,stopwords())) %>%
+  tm_map(removeWords,c(tweetsearch,"amp","https","t.co", "govhack")) %>%
+  tm_map(content_transformer(tolower)) 
+
+corpus_count <- as.matrix(TermDocumentMatrix(corpus))
+corpus_freq <- sort(rowSums(corpus_count), decreasing = TRUE)
+
+col <- brewer.pal(6,"Dark2")
+wordcloudname=paste(format(Sys.time(),"%Y-%m-%d %H-%M wordcloud comment"),"jpg",sep=".")
+jpeg(file=wordcloudname,width = 480,height = 480, quality = 150)
+par(bg="gray10", mar=c(1,1,1,1))
+wordcloud(words=names(corpus_freq),freq = corpus_freq, scale = c(5,.25), max.word=100, random.order=F,colors=col)
+dev.off()
+
+#output of network statistics
+data_sc<-cbind(social_tweets,score=score$score,stringsAsFactors=FALSE)
+write.csv(data_sc,"data2.csv")
+write.csv(stats, "retweet_metrics.csv")
+
+
